@@ -316,8 +316,10 @@ func TestPreemptiveLockerMultiPreemption(t *testing.T) {
 	ftl2.w.watchInterval = 10 * time.Millisecond // low key watch interval
 
 	// Second process contends lock and will wait until preempted by process 3
+	errCh := make(chan error)
 	go func() {
 		defer close(process2)
+		defer close(errCh)
 		ctx2, cf2 := context.WithCancel(context.Background())
 		// we have to make sure the context gets cancelled, otherwise we leave a dangling goroutine
 		// contending the FakeRealPreemptableLock lock channel. In real life, the process context would
@@ -326,15 +328,27 @@ func TestPreemptiveLockerMultiPreemption(t *testing.T) {
 		_, err := ftl2.Lock(ctx2)
 		switch err.(type) {
 		default:
-			t.Fatalf("expected PreemptedLockError, got %q", err)
+			errCh <- fmt.Errorf("expected PreemptedLockError, got %q", err)
 		case *PreemptedLockError:
 			// success
-			t.Log(err)
+			break
 		}
 	}()
 
 	// allow time for the second process to contend
-	time.Sleep(10 * time.Millisecond)
+	select {
+	case err := <-errCh:
+		if err != nil {
+			// if an error comes down the channel
+			t.Fatalf("process 2 Lock(): %v", err)
+		} else {
+			// if a nil comes down the channel
+			t.Fatal("process 2 should not have returned yet")
+		}
+	case <-time.After(time.Duration(10 * time.Millisecond)):
+		// process 2 had time to start and did not generate an error
+		break
+	}
 
 	// third process
 	opts.LockWait = 20 * time.Millisecond
@@ -359,5 +373,15 @@ func TestPreemptiveLockerMultiPreemption(t *testing.T) {
 		t.Fatalf("process 3 should not have been preempted")
 	default:
 		break
+	}
+
+	// ensure that process 2 returned without errors
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("process 2 Lock(): %v", err)
+		}
+	case <-time.After(time.Duration(100 * time.Millisecond)):
+		t.Fatalf("process 2 timed out")
 	}
 }
